@@ -578,6 +578,41 @@ static int cpsw_update_channels_res(struct cpsw_priv *priv, int ch_num, int rx,
 	return 0;
 }
 
+static void cpsw_destroy_rx_pools(struct cpsw_common *cpsw)
+{
+	struct cpsw_priv *priv;
+	int i;
+
+	for (i = 0; i < cpsw->data.slaves; i++) {
+		priv = netdev_priv(cpsw->slaves[i].ndev);
+		if (priv->ndev && netif_running(priv->ndev))
+			cpsw_ndev_destroy_rx_pools(priv);
+	}
+}
+
+static int cpsw_create_rx_pools(struct cpsw_common *cpsw)
+{
+	struct cpsw_priv *priv;
+	int i, ret;
+
+	for (i = 0; i < cpsw->data.slaves; i++) {
+		priv = netdev_priv(cpsw->slaves[i].ndev);
+		if (!(priv->ndev && netif_running(priv->ndev)))
+			continue;
+
+		ret = cpsw_ndev_create_rx_pools(priv);
+		if (ret)
+			goto err_cleanup;
+	}
+
+	return 0;
+
+err_cleanup:
+	cpsw_destroy_rx_pools(cpsw);
+
+	return ret;
+}
+
 int cpsw_set_channels_common(struct net_device *ndev,
 			     struct ethtool_channels *chs,
 			     cpdma_handler_fn rx_handler)
@@ -585,13 +620,17 @@ int cpsw_set_channels_common(struct net_device *ndev,
 	struct cpsw_priv *priv = netdev_priv(ndev);
 	struct cpsw_common *cpsw = priv->cpsw;
 	struct net_device *sl_ndev;
-	int i, ret;
+	int i, new_pools, ret;
 
 	ret = cpsw_check_ch_settings(cpsw, chs);
 	if (ret < 0)
 		return ret;
 
 	cpsw_suspend_data_pass(ndev);
+
+	new_pools = (chs->rx_count != cpsw->rx_ch_num) && cpsw->usage_count;
+	if (new_pools)
+		cpsw_destroy_rx_pools(cpsw);
 
 	ret = cpsw_update_channels_res(priv, chs->rx_count, 1, rx_handler);
 	if (ret)
@@ -623,6 +662,12 @@ int cpsw_set_channels_common(struct net_device *ndev,
 	if (cpsw->usage_count)
 		cpsw_split_res(cpsw);
 
+	if (new_pools) {
+		ret = cpsw_create_rx_pools(cpsw);
+		if (ret)
+			goto err;
+	}
+
 	ret = cpsw_resume_data_pass(ndev);
 	if (!ret)
 		return 0;
@@ -648,8 +693,7 @@ void cpsw_get_ringparam(struct net_device *ndev,
 int cpsw_set_ringparam(struct net_device *ndev,
 		       struct ethtool_ringparam *ering)
 {
-	struct cpsw_priv *priv = netdev_priv(ndev);
-	struct cpsw_common *cpsw = priv->cpsw;
+	struct cpsw_common *cpsw = ndev_to_cpsw(ndev);
 	int ret;
 
 	/* ignore ering->tx_pending - only rx_pending adjustment is supported */
@@ -664,15 +708,21 @@ int cpsw_set_ringparam(struct net_device *ndev,
 
 	cpsw_suspend_data_pass(ndev);
 
+	cpsw_destroy_rx_pools(cpsw);
+
 	cpdma_set_num_rx_descs(cpsw->dma, ering->rx_pending);
 
 	if (cpsw->usage_count)
 		cpdma_chan_split_pool(cpsw->dma);
 
+	ret = cpsw_create_rx_pools(cpsw);
+	if (ret)
+		goto err;
+
 	ret = cpsw_resume_data_pass(ndev);
 	if (!ret)
 		return 0;
-
+err:
 	dev_err(cpsw->dev, "cannot set ring params, closing device\n");
 	dev_close(ndev);
 	return ret;
