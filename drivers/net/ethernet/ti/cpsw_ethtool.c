@@ -531,6 +531,42 @@ static int cpsw_check_ch_settings(struct cpsw_common *cpsw,
 	return 0;
 }
 
+static int cpsw_xdp_rxq_reg(struct cpsw_common *cpsw, int ch)
+{
+	struct cpsw_slave *slave;
+	struct cpsw_priv *priv;
+	int i, ret;
+
+	/* As channels are common for both ports sharing same queues, xdp_rxq
+	 * information also becomes shared and used by every packet on this
+	 * channel. But exch xdp_rxq holds link on netdev, which by the theory
+	 * can have different memory model and so, network device must hold it's
+	 * own set of rxq and thus both netdevs should be prepared
+	 */
+	for (i = cpsw->data.slaves, slave = cpsw->slaves; i; i--, slave++) {
+		if (!slave->ndev)
+			continue;
+
+		priv = netdev_priv(slave->ndev);
+
+		ret = xdp_rxq_info_reg(&priv->xdp_rxq[ch], priv->ndev, ch);
+		if (ret)
+			goto err;
+
+		ret = xdp_rxq_info_reg_mem_model(&priv->xdp_rxq[ch],
+						 MEM_TYPE_PAGE_POOL,
+						 cpsw->rx_page_pool);
+		if (ret)
+			goto err;
+	}
+
+	return ret;
+
+err:
+	cpsw_xdp_rxq_unreg(cpsw, ch);
+	return ret;
+}
+
 static int cpsw_update_channels_res(struct cpsw_priv *priv, int ch_num, int rx,
 				    cpdma_handler_fn rx_handler)
 {
@@ -562,6 +598,11 @@ static int cpsw_update_channels_res(struct cpsw_priv *priv, int ch_num, int rx,
 		if (!vec[*ch].ch)
 			return -EINVAL;
 
+		if (rx && cpsw_xdp_rxq_reg(cpsw, *ch)) {
+			cpdma_chan_destroy(vec[*ch].ch);
+			return -EINVAL;
+		}
+
 		cpsw_info(priv, ifup, "created new %d %s channel\n", *ch,
 			  (rx ? "rx" : "tx"));
 		(*ch)++;
@@ -569,6 +610,9 @@ static int cpsw_update_channels_res(struct cpsw_priv *priv, int ch_num, int rx,
 
 	while (*ch > ch_num) {
 		(*ch)--;
+
+		if (rx)
+			cpsw_xdp_rxq_unreg(cpsw, *ch);
 
 		ret = cpdma_chan_destroy(vec[*ch].ch);
 		if (ret)
