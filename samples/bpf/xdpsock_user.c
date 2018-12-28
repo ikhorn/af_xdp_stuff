@@ -43,8 +43,8 @@
 #define PF_XDP AF_XDP
 #endif
 
-#define NUM_FRAMES (4 * 1024)
-#define BATCH_SIZE 64
+#define NUM_FRAMES 256
+#define BATCH_SIZE 16
 
 #define DEBUG_HEXDUMP 0
 #define MAX_SOCKS 8
