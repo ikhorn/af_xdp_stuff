@@ -693,6 +693,21 @@ static struct proto xsk_proto = {
 	.obj_size =	sizeof(struct xdp_sock),
 };
 
+static int xsk_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
+{
+	struct sock *sk = sock->sk;
+
+	switch (cmd) {
+	case SIOCGSTAMP:
+		return sock_get_timestamp(sk, (struct timeval __user *)arg);
+	case SIOCGSTAMPNS:
+		return sock_get_timestampns(sk, (struct timespec __user *)arg);
+	default:
+		return -ENOIOCTLCMD;
+	}
+	return 0;
+}
+
 static const struct proto_ops xsk_proto_ops = {
 	.family		= PF_XDP,
 	.owner		= THIS_MODULE,
@@ -703,7 +718,7 @@ static const struct proto_ops xsk_proto_ops = {
 	.accept		= sock_no_accept,
 	.getname	= sock_no_getname,
 	.poll		= xsk_poll,
-	.ioctl		= sock_no_ioctl,
+	.ioctl		= xsk_ioctl,
 	.listen		= sock_no_listen,
 	.shutdown	= sock_no_shutdown,
 	.setsockopt	= xsk_setsockopt,
