@@ -254,6 +254,9 @@ static int xsk_generic_xmit(struct sock *sk, struct msghdr *m,
 		skb->priority = sk->sk_priority;
 		skb->mark = sk->sk_mark;
 		skb_shinfo(skb)->destructor_arg = (void *)(long)addr;
+
+		sock_tx_timestamp(sk, sk->sk_tsflags, &skb_shinfo(skb)->tx_flags);
+
 		skb->destructor = xsk_destruct_skb;
 
 		err = dev_direct_xmit(skb, xs->queue_id);
