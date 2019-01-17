@@ -709,6 +709,18 @@ static int xsk_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 	return 0;
 }
 
+static int xsk_recvmsg(struct socket *sock, struct msghdr *msg, size_t len,
+		       int flags)
+{
+	int err = -EINVAL;
+
+	if (flags & MSG_ERRQUEUE)
+		err = sock_recv_errqueue(sock->sk, msg, len, SOL_PACKET,
+					 PACKET_TX_TIMESTAMP);
+
+	return err;
+}
+
 static const struct proto_ops xsk_proto_ops = {
 	.family		= PF_XDP,
 	.owner		= THIS_MODULE,
@@ -725,7 +737,7 @@ static const struct proto_ops xsk_proto_ops = {
 	.setsockopt	= xsk_setsockopt,
 	.getsockopt	= xsk_getsockopt,
 	.sendmsg	= xsk_sendmsg,
-	.recvmsg	= sock_no_recvmsg,
+	.recvmsg	= xsk_recvmsg,
 	.mmap		= xsk_mmap,
 	.sendpage	= sock_no_sendpage,
 };
