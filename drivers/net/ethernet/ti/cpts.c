@@ -43,6 +43,9 @@ struct cpts_skb_cb_data {
 static int cpts_match(struct sk_buff *skb, unsigned int ptp_class,
 		      u16 ts_seqid, u8 ts_msgtype);
 
+static int cpts_xdp_match(struct xdp_buff *xdp, unsigned int ptp_class,
+			  u16 ts_seqid, u8 ts_msgtype);
+
 static int event_expired(struct cpts_event *event)
 {
 	return time_after(jiffies, event->tmo);
@@ -338,6 +341,44 @@ static const struct ptp_clock_info cpts_info = {
 	.do_aux_work	= cpts_overflow_check,
 };
 
+static int cpts_xdp_match(struct xdp_buff *xdp, unsigned int ptp_class,
+			  u16 ts_seqid, u8 ts_msgtype)
+{
+	u16 *seqid;
+	unsigned int offset = 0;
+	u8 *msgtype, *data = xdp->data;
+	int len = xdp->data_end - xdp->data;
+
+	if (ptp_class & PTP_CLASS_VLAN)
+		offset += VLAN_HLEN;
+
+	switch (ptp_class & PTP_CLASS_PMASK) {
+	case PTP_CLASS_IPV4:
+		offset += ETH_HLEN + IPV4_HLEN(data + offset) + UDP_HLEN;
+		break;
+	case PTP_CLASS_IPV6:
+		offset += ETH_HLEN + IP6_HLEN + UDP_HLEN;
+		break;
+	case PTP_CLASS_L2:
+		offset += ETH_HLEN;
+		break;
+	default:
+		return 0;
+	}
+
+	if (len + ETH_HLEN < offset + OFF_PTP_SEQUENCE_ID + sizeof(*seqid))
+		return 0;
+
+	if (unlikely(ptp_class & PTP_CLASS_V1))
+		msgtype = data + offset + OFF_PTP_CONTROL;
+	else
+		msgtype = data + offset;
+
+	seqid = (u16 *)(data + offset + OFF_PTP_SEQUENCE_ID);
+
+	return (ts_msgtype == (*msgtype & 0xf) && ts_seqid == ntohs(*seqid));
+}
+
 static int cpts_match(struct sk_buff *skb, unsigned int ptp_class,
 		      u16 ts_seqid, u8 ts_msgtype)
 {
@@ -373,6 +414,44 @@ static int cpts_match(struct sk_buff *skb, unsigned int ptp_class,
 	seqid = (u16 *)(data + offset + OFF_PTP_SEQUENCE_ID);
 
 	return (ts_msgtype == (*msgtype & 0xf) && ts_seqid == ntohs(*seqid));
+}
+
+static u64 cpts_xdp_find_rxts(struct cpts *cpts, struct xdp_buff *xdp)
+{
+	unsigned int class = PTP_CLASS_V2 | PTP_CLASS_L2;
+	struct ethhdr *hdr = xdp->data;
+	struct list_head *this, *next;
+	struct cpts_event *event;
+	unsigned long flags;
+	u64 ns = 0;
+	u16 seqid;
+	u8 mtype;
+
+	if (ntohs(hdr->h_proto) != ETH_P_1588)
+		return 0;
+
+	spin_lock_irqsave(&cpts->lock, flags);
+	cpts_fifo_read(cpts, -1);
+	list_for_each_safe(this, next, &cpts->events) {
+		event = list_entry(this, struct cpts_event, list);
+		if (event_expired(event)) {
+			list_del_init(&event->list);
+			list_add(&event->list, &cpts->pool);
+			continue;
+		}
+		mtype = (event->high >> MESSAGE_TYPE_SHIFT) & MESSAGE_TYPE_MASK;
+		seqid = (event->high >> SEQUENCE_ID_SHIFT) & SEQUENCE_ID_MASK;
+		if (event_type(event) == CPTS_EV_RX &&
+		    cpts_xdp_match(xdp, class, seqid, mtype)) {
+			ns = timecounter_cyc2time(&cpts->tc, event->low);
+			list_del_init(&event->list);
+			list_add(&event->list, &cpts->pool);
+			break;
+		}
+	}
+
+	spin_unlock_irqrestore(&cpts->lock, flags);
+	return ns;
 }
 
 static u64 cpts_find_ts(struct cpts *cpts, struct sk_buff *skb, int ev_type)
@@ -424,6 +503,19 @@ static u64 cpts_find_ts(struct cpts *cpts, struct sk_buff *skb, int ev_type)
 
 	return ns;
 }
+
+void cpts_xdp_rx_timestamp(struct cpts *cpts, struct xdp_buff *xdp)
+{
+	ktime_t ns;
+
+	ns = cpts_xdp_find_rxts(cpts, xdp);
+	if (!ns)
+		return;
+
+	ns = ns_to_ktime(ns);
+	memcpy(xdp->data_meta, &ns, sizeof(ns));
+}
+EXPORT_SYMBOL_GPL(cpts_xdp_rx_timestamp);
 
 void cpts_rx_timestamp(struct cpts *cpts, struct sk_buff *skb)
 {

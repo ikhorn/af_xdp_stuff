@@ -129,6 +129,7 @@ struct cpts {
 };
 
 void cpts_rx_timestamp(struct cpts *cpts, struct sk_buff *skb);
+void cpts_xdp_rx_timestamp(struct cpts *cpts, struct xdp_buff *xdp);
 void cpts_tx_timestamp(struct cpts *cpts, struct sk_buff *skb);
 int cpts_register(struct cpts *cpts);
 void cpts_unregister(struct cpts *cpts);
