@@ -924,6 +924,7 @@ static void cpsw_rx_handler(void *page, int len, int status)
 	struct cpsw_priv	*priv;
 	struct sk_buff		*skb;
 	struct xdp_buff		xdp;
+	ktime_t			ts;
 
 	if (cpsw->data.dual_emac) {
 		port = CPDMA_RX_SOURCE_PORT(status);
@@ -967,8 +968,6 @@ static void cpsw_rx_handler(void *page, int len, int status)
 
 	priv = netdev_priv(ndev);
 	if (priv->xdp_prog) {
-		xdp_set_data_meta_invalid(&xdp);
-
 		if (status & CPDMA_RX_VLAN_ENCAP) {
 			xdp.data = (u8 *)xmeta + CPSW_HEADROOM +
 				   CPSW_RX_VLAN_ENCAP_HDR_SIZE;
@@ -981,6 +980,20 @@ static void cpsw_rx_handler(void *page, int len, int status)
 
 		xdp.data_hard_start = xmeta;
 		xdp.rxq = &priv->xdp_rxq[ch];
+
+		xdp.data_meta = xdp.data - 2 * sizeof(ts);
+
+		/* set hw ts got by NIC */
+		if (priv->rx_ts_enabled) {
+			cpts_xdp_rx_timestamp(cpsw->cpts, &xdp);
+		} else {
+			((char *)xdp.data_meta)[0] = 0;
+			((char *)xdp.data_meta)[1] = 0;
+		}
+
+		/* set sw ts just before "xdp stack" entrance */
+		ts = ktime_get_real();
+		memcpy(xdp.data_meta + sizeof(ts), &ts, sizeof(ts));
 
 		ret = cpsw_run_xdp(priv, &cpsw->rxv[ch], &xdp);
 		if (!ret)
