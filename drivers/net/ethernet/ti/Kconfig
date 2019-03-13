@@ -66,6 +66,7 @@ config TI_CPSW
 	select TI_DAVINCI_MDIO
 	select TI_CPSW_PHY_SEL
 	select TI_CPSW_ALE
+	select PAGE_POOL
 	select MFD_SYSCON
 	select REGMAP
 	---help---
