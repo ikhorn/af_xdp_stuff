@@ -973,6 +973,10 @@ static int cpsw_run_xdp(struct cpsw_priv *priv, struct cpsw_vector *rxv,
 		ret = 1;
 		break;
 	case XDP_TX:
+		/* TODO: instead of cpsw_ndo_xdp_xmit() use one page xmit with
+		 * recycling DMA mapped pages
+		 */
+
 		xdpf = convert_to_xdp_frame(xdp);
 		if (unlikely(!xdpf))
 			xdp_return_buff(xdp);
@@ -1012,7 +1016,7 @@ static struct page_pool *cpsw_create_rx_pool(struct cpsw_common *cpsw)
 	struct page_pool_params pp_params = { 0 };
 
 	pp_params.order = 0;
-	pp_params.flags = 0; /* no-internal DMA mapping in page_pool */
+	pp_params.flags = PP_FLAG_DMA_MAP; /* use DMA mapping in page_pool */
 	pp_params.pool_size = descs_pool_size;
 	pp_params.nid = NUMA_NO_NODE; /* no numa */
 	pp_params.dma_dir = DMA_FROM_DEVICE;
@@ -1118,6 +1122,12 @@ static void cpsw_rx_handler(void *page, int len, int status)
 	if (priv->rx_ts_enabled)
 		cpts_rx_timestamp(cpsw->cpts, skb);
 	skb->protocol = eth_type_trans(skb, ndev);
+	/* netstack doesn't use page_pool dma map/unmap for now, so recycle
+	 * page here
+	 */
+	dma_unmap_page(cpsw->dev, ((struct page *)page)->private, PAGE_SIZE,
+		       DMA_FROM_DEVICE);
+
 	netif_receive_skb(skb);
 	ndev->stats.rx_bytes += len;
 	ndev->stats.rx_packets++;
@@ -1130,9 +1140,9 @@ requeue:
 
 	new_xmeta->ndev = ndev;
 	new_xmeta->ch = ch;
-	ret = cpdma_chan_submit(cpsw->rxv[ch].ch, new_page,
-				(u8 *)new_xmeta + CPSW_HEADROOM,
-				cpsw->rx_packet_max, 0);
+	ret = cpdma_chan_submit_mapped(cpsw->rxv[ch].ch, new_page,
+				       (u8 *)new_page->private + CPSW_HEADROOM,
+				       cpsw->rx_packet_max, 0);
 	if (WARN_ON(ret < 0))
 		page_pool_recycle_direct(pool, new_page);
 	else
@@ -1911,9 +1921,9 @@ static int cpsw_fill_rx_channels(struct cpsw_priv *priv)
 
 			xmeta->ndev = priv->ndev;
 			xmeta->ch = ch;
-			ret = cpdma_chan_submit(cpsw->rxv[ch].ch, page,
-						(u8 *)xmeta + CPSW_HEADROOM,
-						cpsw->rx_packet_max, 0);
+			ret = cpdma_chan_submit_mapped(cpsw->rxv[ch].ch, page,
+					(u8 *)page->private + CPSW_HEADROOM,
+					cpsw->rx_packet_max, 0);
 			if (ret < 0) {
 				cpsw_err(priv, ifup,
 					 "cannot submit skb to channel %d rx, error %d\n",
