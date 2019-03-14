@@ -867,7 +867,6 @@ static struct xdp_frame *cpsw_handle_to_xdpf(void *handle)
 
 struct cpsw_meta_xdp {
 	struct net_device *ndev;
-	struct page *page;
 	int ch;
 };
 
@@ -1022,15 +1021,15 @@ static struct page_pool *cpsw_create_rx_pool(struct cpsw_common *cpsw)
 	return page_pool_create(&pp_params);
 }
 
-static void cpsw_rx_handler(void *token, int len, int status)
+static void cpsw_rx_handler(void *page, int len, int status)
 {
-	struct cpsw_meta_xdp	*xmeta = token;
+	struct cpsw_meta_xdp	*new_xmeta, *xmeta = page_address(page);
 	struct cpsw_common	*cpsw = ndev_to_cpsw(xmeta->ndev);
 	int			ret = 0, port, ch = xmeta->ch;
 	struct page_pool	*pool = cpsw->rx_page_pool;
 	int			headroom = CPSW_HEADROOM;
 	struct net_device	*ndev = xmeta->ndev;
-	struct page		*page = xmeta->page;
+	struct page 		*new_page;
 	struct cpsw_priv	*priv;
 	struct sk_buff		*skb;
 	struct xdp_buff		xdp;
@@ -1051,19 +1050,27 @@ static void cpsw_rx_handler(void *token, int len, int status)
 			 * in reducing of the number of rx descriptor in
 			 * DMA engine, requeue skb back to cpdma.
 			 */
+			new_page = page;
+			new_xmeta = xmeta;
 			goto requeue;
 		}
 
 		/* the interface is going down, skbs are purged */
-		page_pool_recycle_direct(pool, xmeta->page);
+		page_pool_recycle_direct(pool, page);
 		return;
 	}
 
-	page = page_pool_dev_alloc_pages(pool);
-	xmeta = page_address(page);
-	if (!xmeta) {
+	new_page = page_pool_dev_alloc_pages(pool);
+	if (new_page)
+		new_xmeta = page_address(new_page);
+
+	if (unlikely(!new_page || !new_xmeta)) {
+		if (new_page)
+			page_pool_recycle_direct(pool, new_page);
+
+		new_page = page;
+		new_xmeta = xmeta;
 		ndev->stats.rx_dropped++;
-		xmeta = token;
 		goto requeue;
 	}
 
@@ -1072,16 +1079,16 @@ static void cpsw_rx_handler(void *token, int len, int status)
 		xdp_set_data_meta_invalid(&xdp);
 
 		if (status & CPDMA_RX_VLAN_ENCAP) {
-			xdp.data = (u8 *)token + CPSW_HEADROOM +
+			xdp.data = (u8 *)xmeta + CPSW_HEADROOM +
 				   CPSW_RX_VLAN_ENCAP_HDR_SIZE;
 			xdp.data_end = xdp.data + len -
 				       CPSW_RX_VLAN_ENCAP_HDR_SIZE;
 		} else {
-			xdp.data = (u8 *)token + CPSW_HEADROOM;
+			xdp.data = (u8 *)xmeta + CPSW_HEADROOM;
 			xdp.data_end = xdp.data + len;
 		}
 
-		xdp.data_hard_start = token;
+		xdp.data_hard_start = xmeta;
 		xdp.rxq = &priv->xdp_rxq[ch];
 
 		ret = cpsw_run_xdp(priv, &cpsw->rxv[ch], &xdp);
@@ -1096,11 +1103,10 @@ static void cpsw_rx_handler(void *token, int len, int status)
 	/* Build skb and pass it to networking stack if XDP off or XDP prog
 	 * returned XDP_PASS
 	 */
-	skb = build_skb(token, cpsw_rxbuf_total_len(cpsw->rx_packet_max));
+	skb = build_skb(xmeta, cpsw_rxbuf_total_len(cpsw->rx_packet_max));
 	if (!skb) {
 		ndev->stats.rx_dropped++;
-		page_pool_recycle_direct(pool,
-					 ((struct cpsw_meta_xdp *)token)->page);
+		page_pool_recycle_direct(pool, page);
 		goto requeue;
 	}
 
@@ -1118,20 +1124,19 @@ static void cpsw_rx_handler(void *token, int len, int status)
 
 requeue:
 	if (netif_dormant(ndev)) {
-		page_pool_recycle_direct(pool, page);
+		page_pool_recycle_direct(pool, new_page);
 		return;
 	}
 
-	xmeta->ndev = ndev;
-	xmeta->ch = ch;
-	xmeta->page = page;
-	ret = cpdma_chan_submit(cpsw->rxv[ch].ch, xmeta,
-				(u8 *)xmeta + CPSW_HEADROOM,
+	new_xmeta->ndev = ndev;
+	new_xmeta->ch = ch;
+	ret = cpdma_chan_submit(cpsw->rxv[ch].ch, new_page,
+				(u8 *)new_xmeta + CPSW_HEADROOM,
 				cpsw->rx_packet_max, 0);
 	if (WARN_ON(ret < 0))
-		page_pool_recycle_direct(pool, page);
+		page_pool_recycle_direct(pool, new_page);
 	else
-		kmemleak_not_leak(xmeta);
+		kmemleak_not_leak(new_xmeta);
 }
 
 static void cpsw_split_res(struct net_device *ndev)
@@ -1906,8 +1911,7 @@ static int cpsw_fill_rx_channels(struct cpsw_priv *priv)
 
 			xmeta->ndev = priv->ndev;
 			xmeta->ch = ch;
-			xmeta->page = page;
-			ret = cpdma_chan_submit(cpsw->rxv[ch].ch, xmeta,
+			ret = cpdma_chan_submit(cpsw->rxv[ch].ch, page,
 						(u8 *)xmeta + CPSW_HEADROOM,
 						cpsw->rx_packet_max, 0);
 			if (ret < 0) {
