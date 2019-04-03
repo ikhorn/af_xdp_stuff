@@ -1016,7 +1016,7 @@ static struct page_pool *cpsw_create_rx_pool(struct cpsw_common *cpsw)
 	struct page_pool_params pp_params = { 0 };
 
 	pp_params.order = 0;
-	pp_params.flags = PP_FLAG_DMA_MAP; /* use DMA mapping in page_pool */
+	pp_params.flags = 0;
 	pp_params.pool_size = descs_pool_size;
 	pp_params.nid = NUMA_NO_NODE; /* no numa */
 	pp_params.dma_dir = DMA_FROM_DEVICE;
@@ -1025,15 +1025,47 @@ static struct page_pool *cpsw_create_rx_pool(struct cpsw_common *cpsw)
 	return page_pool_create(&pp_params);
 }
 
-static void cpsw_rx_handler(void *page, int len, int status)
+static struct page *cpsw_alloc_page(struct cpsw_common *cpsw,
+				    struct cpsw_meta_xdp **xmeta)
 {
+	struct page_pool *pool = cpsw->rx_page_pool;
+	struct page *page;
+	dma_addr_t dma;
+
+	*xmeta = NULL;
+	page = page_pool_dev_alloc_pages(pool);
+	if (!page)
+		return NULL;
+
+	*xmeta = page_address(page);
+
+	if (page_private(page))
+		return page;
+
+	dma = dma_map_single(cpsw->dev,
+			     (char *)*xmeta + CPSW_HEADROOM,
+			     cpsw->rx_packet_max, DMA_FROM_DEVICE);
+
+	if (dma_mapping_error(cpsw->dev, dma)) {
+		page_pool_recycle_direct(pool, page);
+		return NULL;
+	}
+
+	set_page_private(page, dma);
+
+	return page;
+}
+
+static void cpsw_rx_handler(void *token, int len, int status)
+{
+	struct page		*new_page, *page = token;
 	struct cpsw_meta_xdp	*new_xmeta, *xmeta = page_address(page);
 	struct cpsw_common	*cpsw = ndev_to_cpsw(xmeta->ndev);
+	int			pkt_size = cpsw->rx_packet_max;
 	int			ret = 0, port, ch = xmeta->ch;
 	struct page_pool	*pool = cpsw->rx_page_pool;
 	int			headroom = CPSW_HEADROOM;
 	struct net_device	*ndev = xmeta->ndev;
-	struct page 		*new_page;
 	struct cpsw_priv	*priv;
 	struct sk_buff		*skb;
 	struct xdp_buff		xdp;
@@ -1064,14 +1096,8 @@ static void cpsw_rx_handler(void *page, int len, int status)
 		return;
 	}
 
-	new_page = page_pool_dev_alloc_pages(pool);
-	if (new_page)
-		new_xmeta = page_address(new_page);
-
-	if (unlikely(!new_page || !new_xmeta)) {
-		if (new_page)
-			page_pool_recycle_direct(pool, new_page);
-
+	new_page = cpsw_alloc_page(cpsw, &new_xmeta);
+	if (unlikely(!new_page)) {
 		new_page = page;
 		new_xmeta = xmeta;
 		ndev->stats.rx_dropped++;
@@ -1107,7 +1133,7 @@ static void cpsw_rx_handler(void *page, int len, int status)
 	/* Build skb and pass it to networking stack if XDP off or XDP prog
 	 * returned XDP_PASS
 	 */
-	skb = build_skb(xmeta, cpsw_rxbuf_total_len(cpsw->rx_packet_max));
+	skb = build_skb(xmeta, cpsw_rxbuf_total_len(pkt_size));
 	if (!skb) {
 		ndev->stats.rx_dropped++;
 		page_pool_recycle_direct(pool, page);
@@ -1125,8 +1151,8 @@ static void cpsw_rx_handler(void *page, int len, int status)
 	/* netstack doesn't use page_pool dma map/unmap for now, so recycle
 	 * page here
 	 */
-	dma_unmap_page(cpsw->dev, ((struct page *)page)->private, PAGE_SIZE,
-		       DMA_FROM_DEVICE);
+	dma_unmap_single(cpsw->dev, (dma_addr_t)page_private(page), pkt_size,
+			 DMA_FROM_DEVICE);
 
 	netif_receive_skb(skb);
 	ndev->stats.rx_bytes += len;
@@ -1141,8 +1167,8 @@ requeue:
 	new_xmeta->ndev = ndev;
 	new_xmeta->ch = ch;
 	ret = cpdma_chan_submit_mapped(cpsw->rxv[ch].ch, new_page,
-				       (u8 *)new_page->private + CPSW_HEADROOM,
-				       cpsw->rx_packet_max, 0);
+				       (void *)page_private(new_page),
+				       pkt_size, 0);
 	if (WARN_ON(ret < 0))
 		page_pool_recycle_direct(pool, new_page);
 	else
@@ -1912,18 +1938,19 @@ static int cpsw_fill_rx_channels(struct cpsw_priv *priv)
 	for (ch = 0; ch < cpsw->rx_ch_num; ch++) {
 		ch_buf_num = cpdma_chan_get_rx_buf_num(cpsw->rxv[ch].ch);
 		for (i = 0; i < ch_buf_num; i++) {
-			page = page_pool_dev_alloc_pages(pool);
-			xmeta = page_address(page);
-			if (!xmeta) {
-				cpsw_err(priv, ifup, "cannot allocate rx token\n");
+			page = cpsw_alloc_page(cpsw, &xmeta);
+			if (!page) {
+				cpsw_err(priv, ifup, "allocate rx page err\n");
 				return -ENOMEM;
 			}
 
 			xmeta->ndev = priv->ndev;
 			xmeta->ch = ch;
-			ret = cpdma_chan_submit_mapped(cpsw->rxv[ch].ch, page,
-					(u8 *)page->private + CPSW_HEADROOM,
-					cpsw->rx_packet_max, 0);
+
+			ret =
+			cpdma_chan_submit_mapped(cpsw->rxv[ch].ch, page,
+						 (void *)page_private(page),
+						 cpsw->rx_packet_max, 0);
 			if (ret < 0) {
 				cpsw_err(priv, ifup,
 					 "cannot submit skb to channel %d rx, error %d\n",
