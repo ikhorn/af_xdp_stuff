@@ -11,7 +11,13 @@
 #if defined(__ASSEMBLY__)
 	.syntax unified
 #else
-__asm__(".syntax unified");
+
+#ifdef CONFIG_BUILD_CLANG_BPF
+#pragma clang diagnostic ".syntax unified" ignored
+#else
+	__asm__(".syntax unified");
+#endif
+
 #endif
 
 #ifdef CONFIG_CPU_V7M
