@@ -14,6 +14,7 @@
 #include <linux/phy.h>
 #include <linux/pm_runtime.h>
 #include <linux/skbuff.h>
+#include <net/page_pool.h>
 
 #include "cpsw.h"
 #include "cpts.h"
@@ -698,6 +699,7 @@ int cpsw_set_ringparam(struct net_device *ndev,
 {
 	struct cpsw_priv *priv = netdev_priv(ndev);
 	struct cpsw_common *cpsw = priv->cpsw;
+	struct page_pool *pool;
 	int ret;
 
 	/* ignore ering->tx_pending - only rx_pending adjustment is supported */
@@ -710,12 +712,19 @@ int cpsw_set_ringparam(struct net_device *ndev,
 	if (ering->rx_pending == cpdma_get_num_rx_descs(cpsw->dma))
 		return 0;
 
+	pool = cpsw_create_rx_pool(cpsw);
+	if (IS_ERR(pool))
+		return PTR_ERR(pool);
+
 	cpsw_suspend_data_pass(ndev);
 
 	cpdma_set_num_rx_descs(cpsw->dma, ering->rx_pending);
 
 	if (cpsw->usage_count)
 		cpdma_chan_split_pool(cpsw->dma);
+
+	page_pool_destroy(cpsw->rx_page_pool);
+	cpsw->rx_page_pool = pool;
 
 	ret = cpsw_resume_data_pass(ndev);
 	if (!ret)

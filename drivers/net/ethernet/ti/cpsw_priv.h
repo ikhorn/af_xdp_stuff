@@ -397,6 +397,7 @@ void cpsw_intr_enable(struct cpsw_common *cpsw);
 void cpsw_intr_disable(struct cpsw_common *cpsw);
 int cpsw_tx_handler(void *token, int len, int status);
 void cpsw_xdp_rxq_unreg(struct cpsw_common *cpsw, int ch);
+struct page_pool *cpsw_create_rx_pool(struct cpsw_common *cpsw);
 
 /* ethtool */
 u32 cpsw_get_msglevel(struct net_device *ndev);
