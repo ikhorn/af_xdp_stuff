@@ -48,6 +48,7 @@ static int page_pool_init(struct page_pool *pool,
 		return -ENOMEM;
 
 	atomic_set(&pool->pages_state_release_cnt, 0);
+	atomic_set(&pool->user_cnt, 0);
 
 	if (pool->p.flags & PP_FLAG_DMA_MAP)
 		get_device(pool->p.dev);
@@ -70,6 +71,8 @@ struct page_pool *page_pool_create(const struct page_pool_params *params)
 		kfree(pool);
 		return ERR_PTR(err);
 	}
+
+	page_pool_get(pool);
 	return pool;
 }
 EXPORT_SYMBOL(page_pool_create);
@@ -356,6 +359,10 @@ static void __warn_in_flight(struct page_pool *pool)
 
 void __page_pool_free(struct page_pool *pool)
 {
+	/* free only if no users */
+	if (!atomic_dec_and_test(&pool->user_cnt))
+		return;
+
 	WARN(pool->alloc.count, "API usage violation");
 	WARN(!ptr_ring_empty(&pool->ring), "ptr_ring is not empty");
 

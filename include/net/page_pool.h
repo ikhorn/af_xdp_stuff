@@ -101,6 +101,7 @@ struct page_pool {
 	struct ptr_ring ring;
 
 	atomic_t pages_state_release_cnt;
+	atomic_t user_cnt;
 };
 
 struct page *page_pool_alloc_pages(struct page_pool *pool, gfp_t gfp);
@@ -181,6 +182,12 @@ static inline void page_pool_release_page(struct page_pool *pool,
 static inline dma_addr_t page_pool_get_dma_addr(struct page *page)
 {
 	return page->dma_addr;
+}
+
+/* used to prevent pool from deallocation */
+static inline void page_pool_get(struct page_pool *pool)
+{
+	atomic_inc(&pool->user_cnt);
 }
 
 static inline bool is_page_pool_compiled_in(void)
