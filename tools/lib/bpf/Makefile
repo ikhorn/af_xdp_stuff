@@ -1,9 +1,15 @@
 # SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
 # Most of this file is copied from tools/lib/traceevent/Makefile
 
-LIBBPF_VERSION := $(shell \
-	grep -oE '^LIBBPF_([0-9.]+)' libbpf.map | \
-	sort -rV | head -n1 | cut -d'_' -f2)
+_LBPFLIST := $(subst ;,,$(patsubst LIBBPF_%,%,$(filter LIBBPF_%, \
+	     $(shell cat libbpf.map))))
+_LBPF2 := $(foreach v,$(_LBPFLIST), \
+	  $(subst $() $(),,$(foreach n,$(subst ., ,$(v)), \
+			$(shell printf "%05d" $(n)))))
+_LBPF2 := $(foreach v,$(_LBPF2), $(shell printf "%050s" $(v)))
+_LBPF_VER := $(word $(words $(sort $(_LBPF2))), $(sort $(_LBPF2)))
+LIBBPF_VERSION := $(patsubst %_$(_LBPF_VER),%,$(filter %_$(_LBPF_VER), \
+		  $(join $(addsuffix _, $(_LBPFLIST)),$(_LBPF2))))
 LIBBPF_MAJOR_VERSION := $(firstword $(subst ., ,$(LIBBPF_VERSION)))
 
 MAKEFLAGS += --no-print-directory
