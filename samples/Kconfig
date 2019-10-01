@@ -169,4 +169,8 @@ config SAMPLE_VFS
 	  as mount API and statx().  Note that this is restricted to the x86
 	  arch whilst it accesses system calls that aren't yet in all arches.
 
+config SAMPLE_BPF
+	bool "BPF samples"
+	depends on HEADERS_INSTALL
+
 endif # SAMPLES
