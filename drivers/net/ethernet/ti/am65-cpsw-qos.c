@@ -69,6 +69,13 @@
 #define AM65_CPSW_PN_FST_EST_ADD_ERR		BIT(17)
 #define AM65_CPSW_PN_FST_EST_BUFACT		BIT(18)
 
+/* EST FETCH COMMAND RAM */
+#define AM65_CPSW_PORT_RAM_BASE			0x10000
+#define AM65_CPSW_FETCH_RAM_SIZE		0x80
+#define AM65_CPSW_FETCH_CNT_MASK		0x3fff
+#define AM65_CPSW_FETCH_CNT_SHIFT		8
+#define AM65_CPSW_FETCH_ALLOW_MASK		0xff
+
 #define SPEED_1000				1000
 
 static void am65_cpsw_est_enable(struct am65_cpsw_common *common, int enable)
@@ -153,16 +160,88 @@ static void am65_cpsw_est_set(struct net_device *ndev, int enable)
 	am65_cpsw_est_enable(common, common_enable);
 }
 
+static u32 am65_cpsw_est_calc_sched(struct net_device *ndev, int interval,
+				    int gate_mask, int link_speed)
+{
+	u32 fetch_cnt, prio_mask;
+	u64 temp;
+
+	temp = interval * link_speed;
+	if (link_speed < SPEED_1000)
+		temp <<= 1;
+
+	fetch_cnt = DIV_ROUND_UP(temp, 8 * 1000);
+
+	/* fetch count can't be less than 16? */
+	if (fetch_cnt < 16)
+		fetch_cnt = 16;
+
+	if (fetch_cnt > AM65_CPSW_FETCH_CNT_MASK) {
+		fetch_cnt &= AM65_CPSW_FETCH_CNT_MASK;
+		dev_dbg(&ndev->dev, "fetch_cnt is more than 14 bits: %d\n",
+			fetch_cnt);
+	}
+
+	if (gate_mask > AM65_CPSW_FETCH_ALLOW_MASK)
+		dev_dbg(&ndev->dev, "fetch_allow is more than 8 bits: %d\n",
+			fetch_cnt);
+
+	prio_mask = gate_mask & AM65_CPSW_FETCH_ALLOW_MASK;
+	return (fetch_cnt << AM65_CPSW_FETCH_CNT_SHIFT) | prio_mask;
+}
+
+static int am65_cpsw_est_set_cycle_scheds(struct net_device *ndev, int cycle,
+					  struct tc_taprio_qopt_offload *taprio)
+{
+	struct am65_cpsw_port *port = am65_ndev_to_port(ndev);
+	struct tc_taprio_sched_entry *entry;
+	void __iomem *ram_base;
+	int link_speed = 1000; /* const for now */
+	int max_cmd_num, i;
+	int buf_offset;
+	u32 sched;
+
+	if (!taprio->enable)
+		return 0;
+
+	max_cmd_num = AM65_CPSW_FETCH_RAM_SIZE / 2;
+	if (taprio->num_entries > max_cmd_num)
+		return -EINVAL;
+
+	buf_offset = cycle * max_cmd_num * 4;
+	ram_base = port->port_base + AM65_CPSW_PORT_RAM_BASE + buf_offset;
+
+	for (i = 0; i < taprio->num_entries; i++) {
+		entry = &taprio->entries[i];
+		sched = am65_cpsw_est_calc_sched(ndev, entry->interval,
+						 entry->gate_mask, link_speed);
+
+		writel(sched, ram_base + i * 4);
+	}
+
+	/* end schedule? */
+	if (i < max_cmd_num)
+		writel(0, ram_base + i * 4);
+
+	return 0;
+}
+
 static int am65_cpsw_set_taprio(struct net_device *ndev, void *type_data)
 {
 	struct tc_taprio_qopt_offload *taprio = type_data;
-	int act_cycle = 0;
+	int ret, act_cycle = 0;
 
 	if (taprio->enable) {
 		act_cycle = am65_cpsw_port_est_get_act_cycle(ndev);
 		if (act_cycle < 0) {
 			dev_err(&ndev->dev, "Failed to get active EST cycle");
 			return act_cycle;
+		}
+
+		ret = am65_cpsw_est_set_cycle_scheds(ndev, act_cycle, taprio);
+		if (ret) {
+			dev_err(&ndev->dev, "Failed to program EST schedules");
+			return ret;
 		}
 	}
 
