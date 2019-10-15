@@ -10,6 +10,7 @@
 
 #include <linux/device.h>
 #include <linux/of.h>
+#include <linux/ptp_clock.h>
 
 struct am65_cpts;
 
@@ -20,6 +21,8 @@ int am65_cpts_phc_index(struct am65_cpts *cpts);
 void am65_cpts_tx_timestamp(struct am65_cpts *cpts, struct sk_buff *skb);
 void am65_cpts_ask_tx_timestamp(struct am65_cpts *cpts, struct sk_buff *skb);
 void am65_cpts_rx_enable(struct am65_cpts *cpts, bool en);
+int am65_cpts_estf_enable(struct am65_cpts *cpts, u64 ns_cycle, u64 ns_start,
+			  int port, int on);
 #else
 static inline struct am65_cpts *am65_cpts_create(struct device *dev,
 						 void __iomem *regs,
@@ -45,6 +48,12 @@ static inline void am65_cpts_ask_tx_timestamp(struct am65_cpts *cpts,
 
 static inline void am65_cpts_rx_enable(struct am65_cpts *cpts, bool en)
 {
+}
+
+int am65_cpts_estf_enable(struct am65_cpts *cpts, u64 ns_cycle, u64 ns_start,
+			  int port, int on)
+{
+	return 0;
 }
 #endif
 

@@ -183,6 +183,14 @@ struct am65_cpts_skb_cb_data {
 	unsigned int ptp_class;
 };
 
+struct am65_cpts_perout_req {
+	struct am65_cpts *cpts;
+	u64 ns_period;
+	u64 ns_start;
+	int idx;
+	int on;
+};
+
 #define am65_cpts_write32(c, v, r) writel(v, &c->reg->r)
 #define am65_cpts_read32(c, r) readl(&c->reg->r)
 
@@ -511,45 +519,59 @@ static int am65_cpts_extts_enable(struct am65_cpts *cpts, u32 index, int on)
 	return 0;
 }
 
+static int am65_cpts_perout_enable_hw_ns(struct am65_cpts_perout_req *req)
+{
+	struct am65_cpts *cpts = req->cpts;
+	u64 cycles;
+	u32 val;
+
+	if (req->on) {
+		cycles = (req->ns_period * cpts->refclk_freq) / NSEC_PER_SEC;
+		if (cycles > U32_MAX)
+			return -EINVAL;
+
+		/* TRM recommends length = 0 while setting comp */
+		if (!!(cpts->genf_enable & BIT(req->idx)) == !!req->on)
+			am65_cpts_write32(cpts, 0, genf[req->idx].length);
+
+		val = upper_32_bits(req->ns_start);
+		am65_cpts_write32(cpts, val, genf[req->idx].comp_hi);
+		val = lower_32_bits(req->ns_start);
+		am65_cpts_write32(cpts, val, genf[req->idx].comp_lo);
+		val = lower_32_bits(cycles);
+		am65_cpts_write32(cpts, val, genf[req->idx].length);
+
+		cpts->genf_enable |= BIT(req->idx);
+	} else {
+		am65_cpts_write32(cpts, 0, genf[req->idx].length);
+
+		cpts->genf_enable &= ~BIT(req->idx);
+	}
+
+	return 0;
+}
+
 /**
  * Enable GENf periodic output
  */
 static int am65_cpts_perout_enable_hw(struct am65_cpts *cpts,
 				      struct ptp_perout_request *req, int on)
 {
+	struct am65_cpts_perout_req req_ns;
 	struct timespec64 ts;
-	u64 ns_period, ns_start;
-	u64 cycles;
-	u32 val;
 
-	if (on) {
-		ts.tv_sec = req->period.sec;
-		ts.tv_nsec = req->period.nsec;
-		ns_period = timespec64_to_ns(&ts);
+	req_ns.cpts = cpts;
+	req_ns.on = on;
 
-		cycles = (ns_period * cpts->refclk_freq) / NSEC_PER_SEC;
-		if (cycles > U32_MAX)
-			return -EINVAL;
+	ts.tv_sec = req->period.sec;
+	ts.tv_nsec = req->period.nsec;
+	req_ns.ns_period = timespec64_to_ns(&ts);
 
-		ts.tv_sec = req->start.sec;
-		ts.tv_nsec = req->start.nsec;
-		ns_start = timespec64_to_ns(&ts);
+	ts.tv_sec = req->start.sec;
+	ts.tv_nsec = req->start.nsec;
+	req_ns.ns_start = timespec64_to_ns(&ts);
 
-		val = upper_32_bits(ns_start);
-		am65_cpts_write32(cpts, val, genf[req->index].comp_hi);
-		val = lower_32_bits(ns_start);
-		am65_cpts_write32(cpts, val, genf[req->index].comp_lo);
-		val = lower_32_bits(cycles);
-		am65_cpts_write32(cpts, val, genf[req->index].length);
-
-		cpts->genf_enable |= BIT(req->index);
-	} else {
-		am65_cpts_write32(cpts, 0, genf[req->index].length);
-
-		cpts->genf_enable &= ~BIT(req->index);
-	}
-
-	return 0;
+	return am65_cpts_perout_enable_hw_ns(&req_ns);
 }
 
 static int am65_cpts_perout_enable(struct am65_cpts *cpts,
@@ -578,6 +600,80 @@ static int am65_cpts_perout_enable(struct am65_cpts *cpts,
 
 	return 0;
 }
+
+#define AM65_CPTS_ESTF_NUM_OFFSET			2
+#define AM65_CPTS_ESTF_SET_LATENCY			(NSEC_PER_USEC * 100)
+
+/**
+ * Enable ESTf periodic output
+ */
+int am65_cpts_estf_enable(struct am65_cpts *cpts, u64 ns_cycle, u64 ns_start,
+			  int port, int on)
+{
+	struct am65_cpts_perout_req req;
+	u64 ns_cur, ns_offset, periods;
+	int ret;
+
+	 /* TODO: should be specified using DTS? */
+	req.idx = AM65_CPTS_ESTF_NUM_OFFSET + port;
+
+	if (cpts->pps_present && req.idx == cpts->pps_genf_idx)
+		return -EINVAL;
+
+	/* TODO; Once verified has to be replaced on:
+	 * am65_cpts_gettime(cpts) and with ptp_clk_mutex;
+	 * becouse of:
+	 * Master clock --sync--> PHC counter --sync--> SYS counter.
+	 */
+	ns_cur = ktime_to_ns(ktime_get_real());
+
+	/* too late */
+	if (ns_start < ns_cur) {
+		periods = (ns_cur - ns_start) / ns_cycle;
+		ns_start = ns_start + periods * ns_cycle + ns_cycle;
+	}
+
+	/* can miss time, adjust next cycle */
+	ns_offset = ns_start - ns_cur;
+	while (ns_offset < AM65_CPTS_ESTF_SET_LATENCY) {
+		/* TODO: remove once no need */
+		ns_offset += ns_cycle;
+		ns_start += ns_cycle;
+	}
+
+	mutex_lock(&cpts->ptp_clk_mutex);
+
+	/* TODO: Remove it after verification
+	 * Master clock --sync--> PHC counter --sync--> SYS counter.
+	 * Thus the PHC time is synchronized and following ns_start
+	 * is not needed, * but temporarily use as offset for testing
+	 * purposes
+	 */
+	ns_cur = am65_cpts_gettime(cpts);
+	ns_start = ns_cur + ns_offset;
+
+	req.ns_period = ns_cycle;
+	req.ns_start = ns_start;
+	req.cpts = cpts;
+	req.on = on;
+	ret = am65_cpts_perout_enable_hw_ns(&req);
+
+	ns_cur = am65_cpts_gettime(cpts);
+	if (ns_cur > ns_start)
+		dev_dbg(cpts->dev, "%s: ESTF: start time very close, configuration latency should be more",
+			__func__);
+
+	mutex_unlock(&cpts->ptp_clk_mutex);
+
+	if (ret)
+		return ret;
+
+	dev_dbg(cpts->dev, "%s: ESTF:%u %s\n", __func__, req.idx,
+		on ? "enabled" : "disabled");
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(am65_cpts_estf_enable);
 
 static int am65_cpts_pps_enable(struct am65_cpts *cpts, int on)
 {
