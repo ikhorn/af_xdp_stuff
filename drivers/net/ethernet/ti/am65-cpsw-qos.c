@@ -30,6 +30,7 @@
 #include <net/pkt_sched.h>
 #include "am65-cpsw-nuss.h"
 #include <linux/time.h>
+#include "am65-cpts.h"
 
 #define AM65_CPSW_REG_CTL			0x004
 #define AM65_CPSW_REG_EST_TS_DOMAIN		0x054
@@ -226,6 +227,20 @@ static int am65_cpsw_est_set_cycle_scheds(struct net_device *ndev, int cycle,
 	return 0;
 }
 
+static int am65_cpsw_set_cycle_counter(struct net_device *ndev,
+				       struct tc_taprio_qopt_offload *taprio)
+{
+	struct am65_cpsw_port *port = am65_ndev_to_port(ndev);
+	struct am65_cpsw_common *common = port->common;
+	int ret;
+
+	/* set cycle time */
+	ret = am65_cpts_estf_enable(common->cpts, taprio->cycle_time,
+				    taprio->base_time, port->port_id,
+				    taprio->enable);
+	return ret;
+}
+
 static int am65_cpsw_set_taprio(struct net_device *ndev, void *type_data)
 {
 	struct tc_taprio_qopt_offload *taprio = type_data;
@@ -245,6 +260,13 @@ static int am65_cpsw_set_taprio(struct net_device *ndev, void *type_data)
 		}
 	}
 
+	ret = am65_cpsw_set_cycle_counter(ndev, taprio);
+	if (ret) {
+		dev_err(&ndev->dev, "Failed to set cycle time");
+		return ret;
+	}
+
+	/* enable est */
 	am65_cpsw_port_est_assign_cycle(ndev, act_cycle);
 	am65_cpsw_est_set(ndev, taprio->enable);
 	return 0;
