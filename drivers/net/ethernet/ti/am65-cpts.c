@@ -514,8 +514,8 @@ static int am65_cpts_extts_enable(struct am65_cpts *cpts, u32 index, int on)
 /**
  * Enable GENf periodic output
  */
-static void am65_cpts_perout_enable_hw(struct am65_cpts *cpts,
-				       struct ptp_perout_request *req, int on)
+static int am65_cpts_perout_enable_hw(struct am65_cpts *cpts,
+				      struct ptp_perout_request *req, int on)
 {
 	struct timespec64 ts;
 	u64 ns_period, ns_start;
@@ -528,6 +528,8 @@ static void am65_cpts_perout_enable_hw(struct am65_cpts *cpts,
 		ns_period = timespec64_to_ns(&ts);
 
 		cycles = (ns_period * cpts->refclk_freq) / NSEC_PER_SEC;
+		if (cycles > U32_MAX)
+			return -EINVAL;
 
 		ts.tv_sec = req->start.sec;
 		ts.tv_nsec = req->start.nsec;
@@ -546,11 +548,15 @@ static void am65_cpts_perout_enable_hw(struct am65_cpts *cpts,
 
 		cpts->genf_enable &= ~BIT(req->index);
 	}
+
+	return 0;
 }
 
 static int am65_cpts_perout_enable(struct am65_cpts *cpts,
 				   struct ptp_perout_request *req, int on)
 {
+	int ret;
+
 	if (req->index >= cpts->ptp_info.n_per_out)
 		return -ENXIO;
 
@@ -561,8 +567,11 @@ static int am65_cpts_perout_enable(struct am65_cpts *cpts,
 		return 0;
 
 	mutex_lock(&cpts->ptp_clk_mutex);
-	am65_cpts_perout_enable_hw(cpts, req, on);
+	ret = am65_cpts_perout_enable_hw(cpts, req, on);
 	mutex_unlock(&cpts->ptp_clk_mutex);
+
+	if (ret)
+		return ret;
 
 	dev_dbg(cpts->dev, "%s: GenF:%u %s\n",
 		__func__, req->index, on ? "enabled" : "disabled");
