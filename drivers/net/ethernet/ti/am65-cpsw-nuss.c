@@ -61,6 +61,7 @@
 #define AM65_CPSW_P0_REG_CTL			0x004
 #define AM65_CPSW_PORT0_REG_FLOW_ID_OFFSET	0x008
 
+#define AM65_CPSW_PORT_REG_TX_PRI_MAP		0x018
 #define AM65_CPSW_PORT_REG_PRI_CTL		0x01c
 #define AM65_CPSW_PORT_REG_RX_PRI_MAP		0x020
 #define AM65_CPSW_PORT_REG_RX_MAXLEN		0x024
@@ -413,7 +414,7 @@ void am65_cpsw_nuss_set_p0_ptype(struct am65_cpsw_common *common)
 		pri_map = 0x76543210;
 	}
 
-	writel(pri_map, host_p->port_base + AM65_CPSW_PORT_REG_RX_PRI_MAP);
+	writel(pri_map, host_p->port_base + AM65_CPSW_PORT_REG_TX_PRI_MAP);
 	writel(val, host_p->port_base + AM65_CPSW_PORT_REG_PRI_CTL);
 }
 
